@@ -1,4 +1,4 @@
 EuroMapAdvanced
 ===============
 
-Sample cinder EuroMap avec interaction, shader et animation le long d'un chemin
+Sample cinder EuroMap avec interaction, scale SVG, scale interactif, shader et animation le long d'un chemin
