@@ -10,6 +10,10 @@
 #include "cinder/Timeline.h"
 #include "cinder/gl/GlslProg.h"
 #include "cinder/gl/Fbo.h"
+#include "cinder/TriMesh.h"
+#include "cinder/triangulate.h"
+#include "cinder/gl/Vbo.h"
+
 #include <iostream>
 //#include <set>
 #include <algorithm>
@@ -35,8 +39,10 @@ class EuroMapApp : public AppBasic {
 	gl::Texture renderSvgGroupToTexture2( const svg::Doc &doc, const string &groupName, Vec2i size, bool alpha );
 	Vec2i GetPointAfterScale(Vec2i point);
 	void resizeFBO(Vec2i size);
+	void resizeFBO2(Vec2i size);
 	void DrawShapeShader();
 	void UpdateMaskCurrentCountry();
+	void recalcShapeMeshes(Shape2d *shape);
 
 	gl::Texture			mMapTex;
 	gl::Texture			mRussieTex;
@@ -45,6 +51,7 @@ class EuroMapApp : public AppBasic {
 	gl::TextureFontRef	mFont;
 	svg::DocRef			mMapDoc;
 	svg::Node 			*mCurrentCountry;
+	svg::Node			*mCurrentCountryShader;
 	svg::Node			*mCurrentPath;
 	Anim<float>			mCurrentCountryAlpha;
 	Anim<float>			mCurrentPathAlpha;
@@ -65,6 +72,7 @@ class EuroMapApp : public AppBasic {
 	float			mAngle;
 
 	gl::Fbo				mFbo;
+	gl::VboMesh			mShapeVboMesh;
 };
 
 gl::Texture renderSvgToTexture( svg::DocRef doc, Vec2i size )
@@ -141,11 +149,32 @@ void EuroMapApp::resizeFBO(Vec2i size)
 		mFbo = gl::Fbo( size.x, size.y, fmt );
 	}
 }
+
+void EuroMapApp::resizeFBO2(Vec2i size)
+{
+	int newsize;
+	if (size.x > size.y){ newsize = size.x;}
+	else {newsize = size.y;}
+	// create or resize framebuffer if needed
+	if(!mFbo || mFbo.getWidth() != newsize || mFbo.getHeight() != newsize) {
+		gl::Fbo::Format fmt;
+
+		// create the buffer
+		mFbo = gl::Fbo( newsize, newsize, fmt );
+	}
+}
+
+
+void EuroMapApp::recalcShapeMeshes(Shape2d *shape)
+{
+ TriMesh2d mesh = Triangulator( *shape).calcMesh( Triangulator::WINDING_ODD );
+ mShapeVboMesh = gl::VboMesh( mesh );
+}
+
 void EuroMapApp::setup()
 {
 	//gl::enableDepthRead();
 	//gl::enableDepthWrite();	
-
 	mScaleCtx = 1.0;
 	mMapDoc = svg::Doc::create( loadAsset( "Europe4.svg" ) );
 
@@ -211,6 +240,13 @@ void EuroMapApp::setup()
 	gl::Fbo::Format format;
 	// même taille que la texture de la map SVG
 	mFbo = gl::Fbo( ceil((double)(mMapDoc->getWidth()) * mScaleCtx),ceil((double)(mMapDoc->getHeight()) * mScaleCtx), format );
+
+	// initialize mShapeVboMesh
+	svg::Node * nodeFrance = const_cast<svg::Node*>(mMapDoc->findNodeByIdContains("France"));
+	Shape2d pathShape = nodeFrance->getShape();
+	recalcShapeMeshes(&pathShape);
+
+	mCurrentCountryShader = NULL;
 
 }
 
@@ -310,6 +346,8 @@ void EuroMapApp::mouseDown( MouseEvent event )
 		if( mCurrentPath && mCurrentPath->getId().empty())
 			mCurrentPath = NULL;
 		UpdateMaskCurrentCountry();
+		//if (mCurrentCountry) recalcShapeMeshes(&mCurrentCountry->getShapeAbsolute());
+		
 	}
 }
 void EuroMapApp::mouseWheel( MouseEvent event )
@@ -374,18 +412,22 @@ void EuroMapApp::update()
 void EuroMapApp::UpdateMaskCurrentCountry()
 {
 	if( mCurrentCountry ) {
-		//resizeFBO(Vec2i(mCurrentCountry->getBoundingBoxAbsolute().getWidth(), mCurrentCountry->getBoundingBoxAbsolute().getHeight())); 
+		mCurrentCountryShader = mCurrentCountry;
+		resizeFBO2(Vec2i(mCurrentCountry->getBoundingBoxAbsolute().getWidth(), mCurrentCountry->getBoundingBoxAbsolute().getHeight())); //Absolute()
+		//console()<<"mFbo.getHeight="<<mFbo.getHeight()<<", mFbo.getWidth()="<<mFbo.getWidth()<<endl;
 		mFbo.bindFramebuffer();
 		gl::pushMatrices();
 		gl::enableAlphaBlending();
 		// flip verticaly
 		gl::pushModelView();
-		gl::translate( Vec2f( 0.0f, getWindowHeight() ) );
+		gl::translate( Vec2f( 0.0f, ceil((double)(mMapDoc->getHeight()) * mScaleCtx) ) );//getWindowHeight()
+		//gl::translate( Vec2f( 0.0f, mFbo.getHeight() ) );
 		gl::scale( Vec2f(1, -1) );
-
+		gl::translate(-mCurrentCountry->getBoundingBoxAbsolute().x1, -mCurrentCountry->getBoundingBoxAbsolute().y1);
 		gl::clear( ColorA( 0.0f, 0.0f, 0.0f,0.0f ) );
 		gl::color( 0.0f, 1.0f, 0.0f,1.0f );
-		gl::drawSolid( mCurrentCountry->getShapeAbsolute(),2.0);
+		gl::drawSolid( mCurrentCountry->getShapeAbsolute(),2.0);//Absolute
+		//gl::drawSolidRect(mCurrentCountry->getBoundingBox());
 
 		// restore the flip
 		gl::popModelView();
@@ -397,6 +439,12 @@ void EuroMapApp::UpdateMaskCurrentCountry()
 }
 void EuroMapApp::DrawShapeShader()
 {
+		if (mCurrentCountryShader)
+		{
+		//FBO method
+		gl::pushMatrices();
+		gl::translate(mCurrentCountryShader->getBoundingBoxAbsolute().x1, mCurrentCountryShader->getBoundingBoxAbsolute().y1);
+		
 		gl::enableAlphaBlending();
 		//glEnable( GL_TEXTURE_2D );
 		mTexture->bind(0);
@@ -405,11 +453,27 @@ void EuroMapApp::DrawShapeShader()
 		mShader->uniform( "tex0", 0 );
 		mShader->uniform("texmask",1);
 		mShader->uniform( "sampleOffset", Vec2f( cos( mAngle ), sin( mAngle ) ) * ( 3.0f / getWindowWidth() ) );
-		Rectf rectDoc = Rectf(0,0,ceil((double)(mMapDoc->getWidth()) * mScaleCtx),ceil((double)(mMapDoc->getHeight()) * mScaleCtx));
-		gl::drawSolidRect( rectDoc );
+		//Rectf rectDoc = Rectf(0,0,ceil((double)(mMapDoc->getWidth()) * mScaleCtx),ceil((double)(mMapDoc->getHeight()) * mScaleCtx));
+		gl::drawSolidRect( mFbo.getBounds());
 		mShader->unbind();
 		mFbo.getTexture().unbind(1);
-		mTexture->unbind(0);		
+		mTexture->unbind(0);
+
+		gl::popMatrices();
+		
+		//VBO method
+	/*
+		gl::enableAlphaBlending();
+		//glEnable( GL_TEXTURE_2D );
+		mTexture->bind(0);
+		mShader->bind();
+		mShader->uniform( "tex0", 0 );
+		mShader->uniform( "sampleOffset", Vec2f( cos( mAngle ), sin( mAngle ) ) * ( 3.0f / getWindowWidth() ) );
+		gl::draw(mShapeVboMesh);
+		mShader->unbind();
+		mTexture->unbind(0);
+		*/
+		}
 }
 void EuroMapApp::draw()
 {
@@ -422,6 +486,7 @@ void EuroMapApp::draw()
 	glLineWidth( 2.0f );
 	//y = abs((x++ % 6) - 3);
 	//mMapTex = renderSvgToTextureScale(mMapDoc, getWindowSize()* getWindowContentScale() , mScale.value());//
+	//DrawShapeShader();
 	gl::pushMatrices();
 	//gl::scale( mScale.value(), mScale.value(),1.f);
 	gl::translate( getWindowWidth()/2.0f, getWindowHeight()/2.0f, 0.0f ); // scale to the center
@@ -443,10 +508,7 @@ void EuroMapApp::draw()
 		gl::draw( mCurrentCountry->getShapeAbsolute(),2.0);
 		gl::color( 0.7f, 0.7f, 0.4f, mCurrentCountryAlpha );
 		gl::drawSolid( mCurrentCountry->getShapeAbsolute(),2.0);
-		
-
 		DrawShapeShader();
-
 		// draw the name
 		string countryName = mCurrentCountry->getId();
 		Vec2f pos = mCurrentCountry->getBoundingBoxAbsolute().getCenter();
